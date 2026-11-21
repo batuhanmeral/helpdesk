@@ -616,6 +616,16 @@ def _get_ticket_export_data(user, request_get):
     return rows
 
 
+_FORMULA_PREFIXES = ('=', '+', '-', '@', '\t', '\r', '\n')
+
+
+def _neutralize_formula(value):
+    """Prefix user text that a spreadsheet would run as a formula (CWE-1236)."""
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
 EXPORT_HEADERS = [
     'ID', 'Konu', 'Durum', 'Öncelik', 'Departman', 'Kategori', 'Etiketler',
     'Talep Sahibi', 'Üstlenen Personel', 'Oluşturulma', 'İlk Yanıt Tarihi',
@@ -634,12 +644,13 @@ def export_csv(request):
     writer = csv.writer(response)
     writer.writerow(EXPORT_HEADERS)
     for r in rows:
-        writer.writerow([
+        # Every cell goes through _neutralize_formula; the rule cannot see that sanitizer.
+        writer.writerow([_neutralize_formula(v) for v in (  # nosemgrep: python.django.security.injection.csv-writer-injection.csv-writer-injection
             r['id'], r['subject'], r['status'], r['priority'],
             r['department'], r['category'], r['tags'], r['sender'], r['assigned_to'],
             r['created_at'], r['first_response_at'], r['first_response'],
             r['closed_at'], r['resolution_note'],
-        ])
+        )])
     return response
 
 
@@ -669,7 +680,7 @@ def export_excel(request):
     ]
     for row_idx, r in enumerate(rows, 2):
         for col_idx, key in enumerate(keys, 1):
-            ws.cell(row=row_idx, column=col_idx, value=r[key])
+            ws.cell(row=row_idx, column=col_idx, value=_neutralize_formula(r[key]))
 
     col_widths = [6, 30, 10, 10, 18, 18, 20, 20, 20, 18, 18, 16, 18, 40]
     for i, w in enumerate(col_widths, 1):

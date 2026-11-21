@@ -33,10 +33,13 @@ WORKDIR /app
 
 # Install Python deps first so the layer is cached across code changes.
 # build-essential + libpq-dev are only needed to compile wheels, then removed.
+# pip itself is removed afterwards: the runtime never installs packages, and its
+# vendored libraries (urllib3, msgpack, setuptools) would ship known CVEs.
 COPY requirements.txt .
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential libpq-dev \
     && pip install -r requirements.txt \
+    && pip uninstall -y pip \
     && apt-get purge -y --auto-remove build-essential libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 

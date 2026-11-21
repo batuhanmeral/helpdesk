@@ -125,6 +125,39 @@ class ExportLanguageTests(TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response['Content-Type'], 'application/pdf')
 
+    def test_exports_neutralize_spreadsheet_formulas(self):
+        """Kullanıcı metni CSV/Excel'de formül olarak çalışmamalı (CWE-1236)."""
+        import csv
+        import io
+
+        import openpyxl
+
+        payloads = ['=HYPERLINK("http://evil.invalid","x")', '+1+1', '-1+1', '@SUM(1)', '\t=1', '\n=1']
+        ticket = Ticket.objects.create(
+            subject=payloads[0], message='x', sender=self.employee, department=self.dept,
+        )
+        Ticket.objects.filter(pk=ticket.pk).update(resolution_note=payloads[1])
+        self.client.force_login(self.admin)
+
+        content = self.client.get(reverse('reports:export_csv')).content.decode('utf-8-sig')
+        csv_row = next(r for r in csv.reader(io.StringIO(content)) if r[0] == str(ticket.pk))
+        self.assertEqual(csv_row[1], "'" + payloads[0])
+        self.assertEqual(csv_row[13], "'" + payloads[1])
+
+        response = self.client.get(reverse('reports:export_excel'))
+        ws = openpyxl.load_workbook(io.BytesIO(response.content)).active
+        excel_row = next(r for r in ws.iter_rows(min_row=2) if r[0].value == ticket.pk)
+        self.assertEqual(excel_row[1].data_type, 's')
+        self.assertEqual(excel_row[1].value, "'" + payloads[0])
+        self.assertEqual(excel_row[13].value, "'" + payloads[1])
+
+        from reports.views import _neutralize_formula
+        for payload in payloads[2:]:
+            with self.subTest(payload=payload):
+                self.assertEqual(_neutralize_formula(payload), "'" + payload)
+        self.assertEqual(_neutralize_formula('Yazıcı çalışmıyor'), 'Yazıcı çalışmıyor')
+        self.assertEqual(_neutralize_formula(42), 42)
+
     def test_status_labels_translate(self):
         with translation.override('en'):
             self.assertEqual(str(Status.OPEN.label), 'Open')
