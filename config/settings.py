@@ -1,6 +1,8 @@
 import os
+from datetime import timedelta as _timedelta
 from pathlib import Path
 from dotenv import load_dotenv
+from django.utils.translation import gettext_lazy as _
 
 load_dotenv()
 
@@ -108,8 +110,6 @@ USE_I18N = True
 
 USE_TZ = True
 
-from django.utils.translation import gettext_lazy as _
-
 LANGUAGES = [
     ('tr', _('Türkçe')),
     ('en', _('English')),
@@ -132,8 +132,6 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 LOGIN_URL = 'identity:login'
 LOGIN_REDIRECT_URL = 'home'
 LOGOUT_REDIRECT_URL = 'identity:login'
-
-from datetime import timedelta as _timedelta
 
 AXES_FAILURE_LIMIT = 5
 AXES_COOLOFF_TIME = _timedelta(minutes=15)

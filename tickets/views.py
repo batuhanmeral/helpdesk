@@ -1266,7 +1266,6 @@ class KanbanView(LoginRequiredMixin, TemplateView):
             qs = qs.filter(sender=user)
 
         from django.utils import timezone
-        from datetime import timedelta
         closed_cutoff = timezone.now() - timedelta(days=30)
 
         context['open_tickets'] = qs.filter(status=Status.OPEN).order_by('-created_at')[:100]

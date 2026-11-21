@@ -1,0 +1,218 @@
+# Scanner images (SEMGREP_IMAGE, ZIZMOR_IMAGE, GITLEAKS_IMAGE, TRIVY_IMAGE, ZAP_IMAGE)
+# live in env variables that Dependabot cannot update. Bump tag and digest together
+# by hand, resolving the digest with `docker buildx imagetools inspect <image>:<tag>`.
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # New CVEs and rules appear against unchanged code. Monthly: the repo is not active.
+  schedule:
+    - cron: '0 6 1 * *'
+  workflow_dispatch:
+  # Release calls this workflow so every published image passed the same gates.
+  workflow_call:
+
+permissions:
+  contents: read
+
+# The prefix keeps the group unique when Release calls this workflow
+# (github.workflow is then the caller's name). Only PR runs are cancelled.
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  SEMGREP_IMAGE: semgrep/semgrep:1.186.0@sha256:6e1b04340e60e910fbb4ddbf3c857ab0918f064417ad5ac530014ccb3cf8c8f1
+  ZIZMOR_IMAGE: ghcr.io/zizmorcore/zizmor:1.32.0@sha256:3014cc8f68f663935f69b3c3e0e41f5ce102b268d97db13db0f62208747f860d
+  GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+  TRIVY_IMAGE: aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
+  ZAP_IMAGE: ghcr.io/zaproxy/zaproxy:2.17.0@sha256:9624669db72f54d86c4b46a7064518bd9bf79d8c61a4c31befa9923489f328af
+
+jobs:
+  sast:
+    name: sast
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # One run: findings go to the log, a SARIF copy to the working directory
+      # (so the source directory is mounted writable).
+      # django-no-csrf-token is excluded: its generic template pattern flags POST forms
+      # that do contain {% csrf_token %} (7 false positives). CsrfViewMiddleware is
+      # enabled globally and nothing is csrf_exempt, so a missing token fails closed (403).
+      - name: Semgrep
+        run: >-
+          docker run --rm -v "$PWD:/src" -w /src "$SEMGREP_IMAGE"
+          semgrep scan --metrics=off --error
+          --severity ERROR --severity WARNING
+          --sarif-output=semgrep.sarif
+          --config p/python --config p/django --config p/dockerfile
+          --exclude-rule python.django.security.django-no-csrf-token.django-no-csrf-token
+      - name: zizmor
+        if: ${{ !cancelled() }}
+        env:
+          # Online audits: impostor commits, known-vulnerable actions.
+          GH_TOKEN: ${{ github.token }}
+        run: docker run --rm -e GH_TOKEN -v "$PWD:/src:ro" "$ZIZMOR_IMAGE" --min-severity medium /src
+      # The SARIF is uploaded from a separate job so the write token never sits next to
+      # a scanner. Skipped on fork PRs, where the token is read-only anyway.
+      - name: Keep Semgrep SARIF
+        if: ${{ !cancelled() && hashFiles('semgrep.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          retention-days: 5
+
+  sast-upload:
+    name: sast-upload
+    needs: sast
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      security-events: write # upload-sarif writes the Semgrep result to code scanning
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: semgrep-sarif
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  secrets:
+    name: secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # full history
+          persist-credentials: false
+      - name: gitleaks (full history)
+        run: >-
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/repo:ro" "$GITLEAKS_IMAGE"
+          git /repo --redact --no-banner --exit-code 1 -v
+
+  dependencies:
+    name: dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Trivy (requirements.txt)
+        run: >-
+          docker run --rm -v "$PWD:/src:ro" -w /src -v "$RUNNER_TEMP/trivy:/root/.cache" "$TRIVY_IMAGE"
+          fs --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 .
+      - name: Trivy (Dockerfile)
+        if: ${{ !cancelled() }}
+        run: >-
+          docker run --rm -v "$PWD:/src:ro" -w /src -v "$RUNNER_TEMP/trivy:/root/.cache" "$TRIVY_IMAGE"
+          config --severity CRITICAL,HIGH --exit-code 1 .
+
+  dependency-review:
+    name: dependency-review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/dependency-review-action@bbc44d14a204704ccc493733616cd1e93a0321ec # v5.0.1
+        with:
+          fail-on-severity: high
+
+  image:
+    name: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image locally (no push)
+        run: |
+          docker build --pull -t helpdesk:ci-only .
+          docker save helpdesk:ci-only -o image.tar
+      # Unfixed OS findings cannot be patched by rebuilding, so only fixable ones fail.
+      - name: Trivy (image)
+        run: >-
+          docker run --rm -v "$PWD:/work:ro" -w /work -v "$RUNNER_TEMP/trivy:/root/.cache" "$TRIVY_IMAGE"
+          image --input image.tar --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1
+      # SBOM of the built image (OS and Python packages); not needed on PRs.
+      - name: CycloneDX SBOM
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: >-
+          docker run --rm -v "$PWD:/work" -w /work -v "$RUNNER_TEMP/trivy:/root/.cache" "$TRIVY_IMAGE"
+          image --input image.tar --format cyclonedx --output sbom.cdx.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && hashFiles('sbom.cdx.json') != '' }}
+        with:
+          name: sbom
+          path: sbom.cdx.json
+          retention-days: 30
+
+  dast:
+    name: dast
+    # Not on PRs; main, schedule and manual runs.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Throwaway values that live only in this runner; no repository secret is used.
+      # The scan stack is plain HTTP, so the HTTPS redirect is off while ZAP runs.
+      - name: Throwaway settings for the scan stack
+        run: |
+          umask 077
+          {
+            echo "SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(50))')"
+            echo "DB_PASSWORD=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+            echo "DEBUG=False"
+            echo "ALLOWED_HOSTS=localhost,127.0.0.1"
+            echo "SECURE_SSL_REDIRECT=False"
+            echo "DB_NAME=dispatch_db"
+            echo "DB_USER=postgres"
+          } > .env
+      - name: Build and start the stack
+        run: docker compose --env-file .env up -d --build --wait --wait-timeout 300
+      # Production settings audit inside the running container (HTTPS redirect back on).
+      - name: Django deploy checks
+        run: >-
+          docker compose exec -T -e SECURE_SSL_REDIRECT=True web
+          python manage.py check --deploy --fail-level WARNING
+      # -I keeps Low/Medium alerts report-only; a scanner error (exit 3) still fails.
+      - name: ZAP baseline
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p zap && chmod 777 zap # the ZAP container writes as a non-root user
+          docker run --rm --network host -v "$PWD/zap:/zap/wrk:rw" "$ZAP_IMAGE" \
+            zap-baseline.py -t http://localhost:8000 -I -r zap-report.html -J zap-report.json
+      # High risk alerts (riskcode 3) fail the job; a missing report fails too.
+      - name: ZAP High risk gate
+        if: ${{ !cancelled() }}
+        run: |
+          high=$(jq '[.site[].alerts[] | select(.riskcode == "3")] | length' zap/zap-report.json)
+          if [ "$high" -gt 0 ]; then
+            jq -r '.site[].alerts[] | select(.riskcode == "3") | "::error::ZAP High risk: \(.name) (\(.pluginid))"' zap/zap-report.json
+            exit 1
+          fi
+          echo "No High risk ZAP alerts"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && hashFiles('zap/zap-report.html') != '' }}
+        with:
+          name: zap-report
+          path: |
+            zap/zap-report.html
+            zap/zap-report.json
+          retention-days: 14
+      - name: Stop the stack
+        if: ${{ always() }}
+        run: docker compose down -v

@@ -42,8 +42,8 @@ docker compose up -d --build
 **Manual setup** (requires Python ≥ 3.13 and PostgreSQL; PDF export needs [WeasyPrint's system libraries](https://doc.courtbouillon.org/weasyprint/stable/first_steps.html#installation)):
 
 ```bash
-git clone https://github.com/batuhanmeral/enterprise-service-management.git
-cd enterprise-service-management
+git clone https://github.com/batuhanmeral/helpdesk.git
+cd helpdesk
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env              # fill in SECRET_KEY, ALLOWED_HOSTS, DB_*
@@ -64,9 +64,35 @@ python manage.py test tickets         # one app
 | Area | Covered |
 | --- | --- |
 | `tickets` | Business-hours SLA math, SLA due dates, auto-assignment, lifecycle transitions, first-response stamping, internal-note visibility, canned responses |
-| `reports` | First-response metrics on the dashboard, export data and PDF summaries in both TR and EN |
+| `reports` | First-response metrics on the dashboard, export data and PDF summaries in both TR and EN, spreadsheet-formula neutralization in CSV/Excel exports |
 
-[GitHub Actions](.github/workflows/ci.yml) runs `manage.py check`, a missing-migration check (`makemigrations --check`) and the full suite on Python 3.13 + PostgreSQL 17 for every push to `main` and every pull request.
+## CI and security
+
+[CI](.github/workflows/ci.yml) runs on every pull request and push to `main`: Ruff (`pip install ruff==0.17.5 && ruff check .`), `manage.py check`, `check --deploy --fail-level WARNING` with `DEBUG=False`, a missing-migration check and the full suite on Python 3.13 + PostgreSQL 17.
+
+[Security](.github/workflows/security.yml) runs on every pull request, on `main`, monthly and on demand:
+
+| Job | Tool | Fails on |
+| --- | --- | --- |
+| `sast` | Semgrep (`p/python`, `p/django`, `p/dockerfile`), zizmor | Semgrep ERROR/WARNING, zizmor medium+ |
+| `secrets` | gitleaks, full history | any finding |
+| `dependencies` | Trivy fs (`requirements.txt`), Trivy config (Dockerfile) | fixable HIGH/CRITICAL |
+| `dependency-review` | GitHub dependency review (PRs only) | new HIGH+ dependency |
+| `image` | Trivy scan of the locally built image | fixable HIGH/CRITICAL |
+| `dast` | compose stack with throwaway settings, `check --deploy`, ZAP baseline (not on PRs) | deploy warning, ZAP High alert |
+
+Outside pull requests the `image` job also keeps a CycloneDX SBOM as an artifact. CodeQL runs as GitHub's default setup and [Scorecard](.github/workflows/scorecard.yml) reports monthly. Dependabot opens grouped monthly PRs for Actions, pip and Docker images (7-day cooldown, majors by hand). Scanner images pinned inside the workflows and the ruff version are bumped by hand, tag and digest together.
+
+[Release](.github/workflows/release.yml) runs only for `vX.Y.Z[-pre]` tags on a commit in `main`. It reruns CI and Security, pushes the image to `ghcr.io/batuhanmeral/helpdesk` by digest, blocks on fixable HIGH/CRITICAL vulnerabilities, attests provenance, Cosign-signs the digest and only then adds the version tags. Verify a release with:
+
+```bash
+gh attestation verify oci://ghcr.io/batuhanmeral/helpdesk@sha256:DIGEST --repo batuhanmeral/helpdesk
+cosign verify ghcr.io/batuhanmeral/helpdesk@sha256:DIGEST \
+  --certificate-identity-regexp '^https://github\.com/batuhanmeral/helpdesk/\.github/workflows/release\.yml@refs/tags/v.*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md). Design and operational notes live in `.docs/` (Turkish, kept local).
 
 ## Project Structure
 

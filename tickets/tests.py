@@ -20,13 +20,32 @@ def dt(year, month, day, hour, minute=0):
 
 
 # 2026-01-05 Pazartesi
-MON = lambda h, m=0: dt(2026, 1, 5, h, m)
-TUE = lambda h, m=0: dt(2026, 1, 6, h, m)
-WED = lambda h, m=0: dt(2026, 1, 7, h, m)
-FRI = lambda h, m=0: dt(2026, 1, 9, h, m)
-SAT = lambda h, m=0: dt(2026, 1, 10, h, m)
-SUN = lambda h, m=0: dt(2026, 1, 11, h, m)
-NEXT_MON = lambda h, m=0: dt(2026, 1, 12, h, m)
+def MON(h, m=0):
+    return dt(2026, 1, 5, h, m)
+
+
+def TUE(h, m=0):
+    return dt(2026, 1, 6, h, m)
+
+
+def WED(h, m=0):
+    return dt(2026, 1, 7, h, m)
+
+
+def FRI(h, m=0):
+    return dt(2026, 1, 9, h, m)
+
+
+def SAT(h, m=0):
+    return dt(2026, 1, 10, h, m)
+
+
+def SUN(h, m=0):
+    return dt(2026, 1, 11, h, m)
+
+
+def NEXT_MON(h, m=0):
+    return dt(2026, 1, 12, h, m)
 
 
 class AddBusinessHoursTests(SimpleTestCase):

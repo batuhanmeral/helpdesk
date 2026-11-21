@@ -1,0 +1,75 @@
+version: 2
+
+# Monthly grouped PRs (the repo is not active). The cooldown skips releases younger
+# than a week, so a hijacked release has time to be yanked before it reaches a PR.
+# Security updates are not affected by the schedule, cooldown or ignore rules.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      pip-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Majors need code changes; take them by hand. Security updates still open PRs.
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
+
+  # Python base image in the Dockerfile.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      docker:
+        patterns: ["*"]
+    ignore:
+      # Majors need code changes; take them by hand. Security updates still open PRs.
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
+      # A Python minor (3.13 -> 3.14) changes the runtime; move it by hand too.
+      - dependency-name: python
+        update-types: [version-update:semver-minor]
+
+  # PostgreSQL in docker-compose.yml.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      docker-compose:
+        patterns: ["*"]
+    ignore:
+      # Majors need code changes (a PostgreSQL major needs dump/restore); take them by hand.
+      # Security updates still open PRs.
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]

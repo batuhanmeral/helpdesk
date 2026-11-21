@@ -1,0 +1,155 @@
+name: Release
+
+# Dormant until a v* tag is pushed; nothing is published from main.
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+# Never cancel a publish halfway: a partial run leaves an unsigned digest behind.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Validate tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag must look like v1.2.3 or v1.2.3-rc.1"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # needs origin/main for the ancestry check
+          persist-credentials: false
+      - name: Tagged commit is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+  # The same CI and Security gates run for this exact commit; the standalone
+  # workflows do not trigger on tags.
+  ci:
+    name: ci
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  security:
+    name: security
+    needs: validate
+    uses: ./.github/workflows/security.yml
+    permissions:
+      contents: read
+      security-events: write # Semgrep SARIF upload inside the called workflow
+
+  # Order: push by digest (no tags) -> scan that digest -> attest + sign -> tag.
+  # If any step fails, no tag points at an unscanned or unsigned image.
+  publish:
+    name: publish
+    needs: [ci, security]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+      packages: write # push the image to GHCR
+      id-token: write # keyless cosign signature and provenance via GitHub OIDC
+      attestations: write # store build provenance attestations
+    env:
+      IMAGE: ghcr.io/batuhanmeral/helpdesk
+      # Not tracked by Dependabot: bump tag and digest by hand.
+      TRIVY_IMAGE: aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.39.0 # manual pin
+          cache-binary: false
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push by digest only
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          no-cache: true
+          pull: true
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
+      # Unfixed OS findings cannot be patched by rebuilding, so they do not block a release.
+      - name: Scan the pushed digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker pull "$IMAGE@$DIGEST"
+          docker save "$IMAGE@$DIGEST" -o image.tar
+          docker run --rm -v "$PWD:/work:ro" -w /work "$TRIVY_IMAGE" \
+            image --input image.tar --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1
+      - name: Attest registry digest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4 # manual pin
+      - name: Keyless signature of the immutable digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+      - name: Tag the signed digest
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && args+=(--tag "$tag")
+          done <<< "$TAGS"
+          docker buildx imagetools create "${args[@]}" "$IMAGE@$DIGEST"
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            remote_digest=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            test "$remote_digest" = "$DIGEST"
+          done <<< "$TAGS"
+      - name: Verification commands
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          {
+            echo '```bash'
+            echo "gh attestation verify oci://$IMAGE@$DIGEST --repo $REPO"
+            echo "cosign verify --certificate-identity https://github.com/$WORKFLOW_REF \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com $IMAGE@$DIGEST"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

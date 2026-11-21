@@ -4,17 +4,48 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  # Release calls this workflow so every published image passed the same gates.
+  workflow_call:
 
+permissions:
+  contents: read
+
+# The prefix keeps the group unique when Release calls this workflow
+# (github.workflow is then the caller's name). Only PR runs are cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# No pip cache: Release reuses this workflow and must not restore a cache a PR wrote.
 jobs:
-  test:
+  lint:
+    name: lint
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      # Manual pin: Dependabot does not see versions installed in workflow steps.
+      - run: pip install ruff==0.17.5
+      - run: ruff check .
+
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     services:
       postgres:
-        image: postgres:17
+        # Dependabot does not update service images; bump tag and digest by hand.
+        image: postgres:17@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
         env:
           POSTGRES_DB: dispatch_db
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: ci-only-postgres # CI service container only, not a real secret
         ports:
           - 5432:5432
         options: >-
@@ -23,22 +54,29 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      SECRET_KEY: ci-only-not-secret
+      SECRET_KEY: ci-only-placeholder-for-django-deploy-validation-0123456789-abcdef
       DEBUG: 'True'
       DB_NAME: dispatch_db
       DB_USER: postgres
-      DB_PASSWORD: postgres
+      DB_PASSWORD: ci-only-postgres
       DB_HOST: localhost
       DB_PORT: '5432'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
-          cache: pip
-      # WeasyPrint (PDF export) needs Pango at runtime
+      # WeasyPrint (PDF export) needs Pango at runtime.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpango-1.0-0 libpangoft2-1.0-0
       - run: pip install -r requirements.txt
       - run: python manage.py check
+      # Production settings audit (DEBUG, SECURE_*, cookie flags, HSTS).
+      - name: Django deploy checks
+        run: python manage.py check --deploy --fail-level WARNING
+        env:
+          DEBUG: 'False'
+          ALLOWED_HOSTS: ci-only.example.invalid
       - run: python manage.py makemigrations --check --dry-run
       - run: python manage.py test
