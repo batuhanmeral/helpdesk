@@ -31,6 +31,17 @@ Dispatch is a Django help-desk platform that takes an internal support request f
 | **Documents** | WeasyPrint (PDF), openpyxl (Excel), Pillow (images) |
 | **DevOps** | Gunicorn, Docker, Docker Compose, gettext (i18n) |
 
+## Project Structure
+
+| App | Responsibility |
+| --- | --- |
+| `identity` | User model, authentication, roles, audit logging |
+| `departments` | Departments, categories, auto-assignment config |
+| `tickets` | Ticket lifecycle, SLAs, first response, assignment, comments, internal notes, canned responses, attachments, history |
+| `notifications` | In-app notifications and the unread-count badge |
+| `reports` | Dashboard metrics and CSV / Excel / PDF exports |
+| `config` | Project settings, URLs, role-based landing dashboard |
+
 ## Installation
 
 **With Docker** (app + PostgreSQL 17, migrations run on boot, served on `127.0.0.1:8000`):
@@ -68,42 +79,11 @@ python manage.py test tickets         # one app
 
 ## CI and security
 
-[CI](.github/workflows/ci.yml) runs on every pull request and push to `main`: Ruff (`pip install ruff==0.17.5 && ruff check .`), `manage.py check`, `check --deploy --fail-level WARNING` with `DEBUG=False`, a missing-migration check and the full suite on Python 3.13 + PostgreSQL 17.
+- [CI](.github/workflows/ci.yml): Ruff, Django system and deploy checks, a missing-migration check and the full test suite on Python 3.13 + PostgreSQL 17.
+- [Security](.github/workflows/security.yml): Semgrep, zizmor, gitleaks, Trivy (dependencies, Dockerfile, image), dependency review and a ZAP baseline scan.
+- [Release](.github/workflows/release.yml): images for `vX.Y.Z` tags are pushed to `ghcr.io/batuhanmeral/helpdesk` by digest, with provenance attestation and a Cosign signature.
 
-[Security](.github/workflows/security.yml) runs on every pull request, on `main`, monthly and on demand:
-
-| Job | Tool | Fails on |
-| --- | --- | --- |
-| `sast` | Semgrep (`p/python`, `p/django`, `p/dockerfile`), zizmor | Semgrep ERROR/WARNING, zizmor medium+ |
-| `secrets` | gitleaks, full history | any finding |
-| `dependencies` | Trivy fs (`requirements.txt`), Trivy config (Dockerfile) | fixable HIGH/CRITICAL |
-| `dependency-review` | GitHub dependency review (PRs only) | new HIGH+ dependency |
-| `image` | Trivy scan of the locally built image | fixable HIGH/CRITICAL |
-| `dast` | compose stack with throwaway settings, `check --deploy`, ZAP baseline (not on PRs) | deploy warning, ZAP High alert |
-
-Outside pull requests the `image` job also keeps a CycloneDX SBOM as an artifact. CodeQL runs as GitHub's default setup and [Scorecard](.github/workflows/scorecard.yml) reports monthly. Dependabot opens grouped monthly PRs for Actions, pip and Docker images (7-day cooldown, majors by hand). Scanner images pinned inside the workflows and the ruff version are bumped by hand, tag and digest together.
-
-[Release](.github/workflows/release.yml) runs only for `vX.Y.Z[-pre]` tags on a commit in `main`. It reruns CI and Security, pushes the image to `ghcr.io/batuhanmeral/helpdesk` by digest, blocks on fixable HIGH/CRITICAL vulnerabilities, attests provenance, Cosign-signs the digest and only then adds the version tags. Verify a release with:
-
-```bash
-gh attestation verify oci://ghcr.io/batuhanmeral/helpdesk@sha256:DIGEST --repo batuhanmeral/helpdesk
-cosign verify ghcr.io/batuhanmeral/helpdesk@sha256:DIGEST \
-  --certificate-identity-regexp '^https://github\.com/batuhanmeral/helpdesk/\.github/workflows/release\.yml@refs/tags/v.*$' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
-```
-
-To report a vulnerability, see [SECURITY.md](SECURITY.md). Design and operational notes live in `.docs/` (Turkish, kept local).
-
-## Project Structure
-
-| App | Responsibility |
-| --- | --- |
-| `identity` | User model, authentication, roles, audit logging |
-| `departments` | Departments, categories, auto-assignment config |
-| `tickets` | Ticket lifecycle, SLAs, first response, assignment, comments, internal notes, canned responses, attachments, history |
-| `notifications` | In-app notifications and the unread-count badge |
-| `reports` | Dashboard metrics and CSV / Excel / PDF exports |
-| `config` | Project settings, URLs, role-based landing dashboard |
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## Screenshots
 
